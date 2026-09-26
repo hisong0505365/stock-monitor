@@ -74,12 +74,28 @@ def cap_grade(grade, floor):
     return floor if GRADE_ORDER.index(grade) < GRADE_ORDER.index(floor) else grade
 
 
+# 감사보고서 주석 1(사업 목적 문장)에서 판정한 업종 → 업종 코드 앞자리
+# OpenDART 업종코드가 없을 때 쓴다(disclosure_parser.business_profile)
+REPORT_INDUSTRY_CODES = {"도매": "46", "제조": "C"}
+
+
 def thresholds_for(induty_code):
     code = str(induty_code or "")
     for prefix, overrides in INDUSTRY_THRESHOLDS.items():
         if code.startswith(prefix):
             return overrides
     return {}
+
+
+def industry_code(report, induty_code=None):
+    """→ (업종 코드, 출처 설명). DART 업종코드가 우선, 없으면 보고서 주석에서 판정한 업종"""
+    if induty_code:
+        return str(induty_code), f"DART 업종코드 {induty_code}"
+    business = report["meta"].get("business") or {}
+    code = REPORT_INDUSTRY_CODES.get(business.get("industry"))
+    if code:
+        return code, f"보고서 주석의 사업 목적 → {business['industry']}"
+    return None, None
 
 
 def ratio_table(report, period="당기", prev="전기"):
@@ -117,7 +133,8 @@ def ratio_table(report, period="당기", prev="전기"):
 def score_report(report, induty_code=None):
     """파싱된 감사보고서 1건 → {total_score, credit_grade, category_scores, ratios, flags}"""
     meta = report["meta"]
-    overrides = thresholds_for(induty_code)
+    code, code_source = industry_code(report, induty_code)
+    overrides = thresholds_for(code)
     values = ratio_table(report)
 
     metrics = []
@@ -141,6 +158,8 @@ def score_report(report, induty_code=None):
              if total_weight else None)
 
     flags = []
+    if overrides:
+        flags.append(f"도매업 기준 적용 ({code_source})")
     grade = grade_for(total) if total is not None else None
 
     # 추출 검증에 실패한 숫자로는 등급을 내지 않는다 — 대시보드에서 '미평가'로 보인다

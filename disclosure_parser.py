@@ -296,6 +296,8 @@ def extract_metadata(doc):
     lines = [l.strip() for l in cover.split("\n") if l.strip()]
     if lines:
         meta["company"] = lines[0]
+    # 표지 제목: '재무제표에 대한 감사보고서'(별도) / '연결재무제표에 대한 감사보고서'(연결)
+    meta["consolidated"] = "연결재무제표에대한" in squash(cover)
     for l in lines:
         if squash(l).endswith("회계법인"):
             meta["auditor"] = squash(l)
@@ -329,25 +331,89 @@ def extract_metadata(doc):
     if m:
         meta["gaap"] = "K-IFRS" if m.group(1).startswith("한국채택") else "K-GAAP(일반기업회계기준)"
 
-    # 감사의견: 비상장 외감법인은 핵심감사사항이 없으므로 의견 문구로 판정
-    if "의견을표명하지않습니다" in flat or "의견거절" in flat:
-        meta["opinion"] = "의견거절"
-    elif "공정하게표시하고있지않습니다" in flat:
-        meta["opinion"] = "부적정"
-    elif "한정의견" in flat:
-        meta["opinion"] = "한정"
-    elif "공정하게표시하고있습니다" in flat:
-        meta["opinion"] = "적정"
-    meta["going_concern_uncertainty"] = "계속기업으로서의존속능력에유의적의문" in flat
-    meta["has_emphasis_of_matter"] = "강조사항" in flat
-    meta["has_key_audit_matters"] = "핵심감사사항" in flat
-    meta["has_other_matter"] = "기타사항" in flat
+    meta.update(audit_findings(audit_flat))
     meta["has_icfr_review"] = "내부회계관리제도" in flat and "검토의견" in flat
+    meta["business"] = business_profile(_notes_intro(doc))
 
     meta["audit_hours"] = _extract_audit_hours(doc)
     meta["pages_without_text"] = [i + 1 for i, p in enumerate(doc)
                                   if p.get_images() and len(squash(p.get_text())) < 80]
     return meta
+
+
+# ===== 감사의견 판정 =====
+# 감사보고서 본문(표지 ~ 첨부 재무제표 표지)만 본다. 주석·내부회계관리제도 보고서의 문구로
+# 판정이 흔들리지 않게 하려는 것이다.
+#
+# ⚠️ 모든 감사보고서의 '감사인의 책임' 표준 문단에 "계속기업으로서의 존속능력에 대하여 유의적
+#    의문을 초래할 수 있는 … 중요한 불확실성이 존재하는지 여부"와 "중요한 불확실성이 존재한다고
+#    결론을 내리는 경우"가 들어 있다. '중요한 불확실성' 같은 단어만 찾으면 모든 회사가 걸리고,
+#    특정 문구 하나만 찾으면 표현이 조금만 달라도 놓친다(2026-09-26 검증에서 확인). 실제 해당
+#    보고서에만 나오는 **단락 제목**과 **결론 문장**으로 판정한다.
+
+# 비적정 신호 — 표준 문단에는 절대 나오지 않는 단락 제목·결론 문장. 이것부터 찾는다.
+# '감사의견' 이라는 단어는 제목뿐 아니라 "감사의견을 위한 근거로서" 같은 표준 문장에도 있어서,
+# 제목만 보고 판정하면 한정 제목이 빠진 옛 양식의 한정 보고서를 적정으로 읽는다(검증에서 확인).
+NON_CLEAN_OPINIONS = [
+    ("의견거절", re.compile(r"의견거절|의견을표명하지않습니다")),
+    ("부적정", re.compile(r"부적정의견|공정하게표시하고있지않습니다")),
+    ("한정", re.compile(r"한정의견|영향을제외하고는,?[^.]{0,200}공정하게표시하고있습니다")),
+]
+GOING_CONCERN = re.compile(
+    r"계속기업관련중요한불확실성"                        # 감사기준서 570 단락 제목
+    r"|중요한불확실성이존재함을나타냅니다"                  # 그 단락의 결론 문장
+    r"|존속능력에(대하여)?(유의적|중대한)의문을제기(할만한|하고있)")  # 결론 문장 · 옛 강조사항 문구
+
+
+def audit_findings(audit_text):
+    """감사보고서 본문(공백 제거) → 감사의견 · 계속기업 불확실성 · 강조/기타사항"""
+    opinion = next((name for name, pattern in NON_CLEAN_OPINIONS if pattern.search(audit_text)),
+                   None)
+    if opinion is None and ("공정하게표시하고있습니다" in audit_text or "감사의견" in audit_text):
+        opinion = "적정"
+    return {
+        "opinion": opinion,
+        "going_concern_uncertainty": bool(GOING_CONCERN.search(audit_text)),
+        "has_emphasis_of_matter": "강조사항" in audit_text,
+        "has_key_audit_matters": "핵심감사사항" in audit_text,
+        "has_other_matter": "기타사항" in audit_text,
+    }
+
+
+# ===== 업종 판정 (주석 1. 일반사항) =====
+# OpenDART 업종코드를 못 받을 때 쓴다. 도매업체도 "제조업체로부터 매입" 처럼 '제조' 라는 말을
+# 쓰므로 주석 전체가 아니라 **사업 목적 문장** 안에서만 판정한다.
+
+PURPOSE_SENTENCE = re.compile(
+    r"[^.。]*(목적으로|목적사업|사업목적|주요사업내용|주요\s*사업\s*내용|영위)[^.。]*")
+MANUFACTURING = re.compile(r"제조|생산|연구개발")
+WHOLESALE = re.compile(r"도매|도ㆍ소매|도·소매|도소매|유통|판매업|수출입|수입")
+
+
+def _notes_intro(doc):
+    """주석 첫 부분(1. 일반사항 ~ 2. 중요한 회계정책 전)"""
+    start = next((i for i, p in enumerate(doc) if _page_title(p).startswith("주석")), None)
+    if start is None:
+        return ""
+    text = "".join(doc[i].get_text() for i in range(start, min(start + 2, doc.page_count)))
+    end = re.search(r"\n\s*2\s*[\.-]?\s*(중요한\s*회계정책|재무제표\s*작성\s*기준)", text)
+    return text[:end.start()] if end else text[:2000]
+
+
+def business_profile(notes_intro):
+    """→ {"purpose": 사업 목적 문장, "industry": '도매' | '제조' | None}"""
+    text = re.sub(r"\s+", " ", notes_intro)
+    m = PURPOSE_SENTENCE.search(text)
+    purpose = m.group(0).strip() if m else None
+    if purpose:   # 문장 앞에 붙어 나온 주석 제목('1. 일반 사항', '1-3. 주요 사업내용') 떼기
+        purpose = re.sub(r"^[\d\-\.\s]*(일반\s*사항|회사의\s*개요|주요\s*사업\s*내용)\s*", "", purpose)
+    industry = None
+    if purpose:
+        if MANUFACTURING.search(purpose):
+            industry = "제조"
+        elif WHOLESALE.search(purpose):
+            industry = "도매"
+    return {"purpose": purpose, "industry": industry}
 
 
 def _extract_audit_hours(doc):

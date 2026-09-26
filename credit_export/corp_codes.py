@@ -70,6 +70,8 @@ class CorpCodeResolver:
         # 정규화 이름 → [corp_code]  (같은 이름이 둘 이상이면 모호)
         self.existing = self._index(existing_companies or [])
         self.dart = self._index(dart_list or [])
+        # corp-map 번호가 Supabase 에 이미 있는 같은 이름의 번호와 다르면 같은 회사가 둘로 갈라진다
+        self.conflicts = []
 
     @staticmethod
     def _index(rows):
@@ -80,10 +82,14 @@ class CorpCodeResolver:
 
     def resolve(self, company_name, file_name=None):
         """→ (corp_code, 출처) 또는 (None, 사유)"""
+        norm = normalize_company_name(company_name)
         for key in (file_name, company_name):
             if key and key in self.corp_map:
-                return self.corp_map[key], "corp-map"
-        norm = normalize_company_name(company_name)
+                code = self.corp_map[key]
+                existing = sorted(set(self.existing.get(norm, [])) - {code})
+                if existing:
+                    self.conflicts.append((company_name, code, existing))
+                return code, "corp-map"
         for source, idx in (("supabase", self.existing), ("opendart", self.dart)):
             codes = sorted(set(idx.get(norm, [])))
             if len(codes) == 1:

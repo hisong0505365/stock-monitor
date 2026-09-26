@@ -6,10 +6,10 @@ import pytest
 
 from credit_export.corp_codes import CorpCodeResolver, parse_corp_code_xml
 from credit_export.export import (
-    _clean, build_financials, build_link, filter_evaluations, filter_links,
+    _clean, build_financials, build_link, dedupe_reports, filter_evaluations, filter_links,
 )
 from credit_export.matching import match_customers, match_one, normalize_company_name
-from credit_export.scoring import cap_grade, grade_for, score_report
+from credit_export.scoring import cap_grade, grade_for, industry_code, score_report
 from credit_export.supabase_rest import PAGE, SupabaseRest
 
 
@@ -33,6 +33,21 @@ def test_지점_표기는_유사():
 @pytest.mark.parametrize("name", ["지오영약국", "백제약국", "지오영의원", "백제약품약국"])
 def test_약국_의원은_이름이_비슷해도_붙이지_않는다(name):
     assert match_one(name, COMPANIES) is None
+
+
+# 2026-09-26 통합 테스트에서 '지오영경동물류센터' 가 지오영에 붙었다(지오영경동은 별개 법인).
+# 회사명 뒤 '아무 글자 + 센터' 를 지점으로 보던 규칙을 '지역 + 지점 표기' 로 좁혔다.
+@pytest.mark.parametrize("name", ["지오영경동물류센터", "(주)지오영경동", "지오영경동센터",
+                                  "지오영 경동지점", "지오영케어", "아주약품상사"])
+def test_다른_법인으로_보이는_이름은_붙이지_않는다(name):
+    companies = {**COMPANIES, "아주약품주식회사": "아주약품"}
+    assert match_one(name, companies) is None
+
+
+@pytest.mark.parametrize("name", ["지오영 부산지점", "지오영(부산)", "지오영경기남부지점",
+                                  "지오영 영등포물류센터", "지오영본사", "지오영2"])
+def test_지역_지점_표기는_유사로_붙인다(name):
+    assert match_one(name, COMPANIES)[:2] == ("주식회사 지오영", "유사")
 
 
 def test_앞글자가_다르면_유사도가_높아도_붙이지_않는다():
@@ -64,6 +79,13 @@ def test_같은_이름이_둘이면_지어내지_않고_보류():
             {"corp_code": "00000002", "corp_name": "(주)지오영"}]
     code, why = CorpCodeResolver({}, [], dart).resolve("주식회사 지오영")
     assert code is None and "2곳" in why
+
+
+def test_corp_map_이_Supabase_기존_번호와_다르면_경고():
+    r = CorpCodeResolver({"주식회사 지오영": "00000001"},
+                         [{"corp_code": "00111111", "corp_name": "(주)지오영"}])
+    assert r.resolve("주식회사 지오영") == ("00000001", "corp-map")
+    assert r.conflicts == [("주식회사 지오영", "00000001", ["00111111"])]
 
 
 def test_못_찾으면_보류():
@@ -125,6 +147,15 @@ def test_도매업_기준을_쓰면_부채비율_점수가_오른다():
     assert debt(wholesale) > debt(base)
 
 
+def test_업종코드가_없으면_보고서_주석의_업종을_쓴다():
+    r = _report(business={"industry": "도매", "purpose": "의약품 도ㆍ소매업을 목적으로"})
+    assert industry_code(r) == ("46", "보고서 주석의 사업 목적 → 도매")
+    assert industry_code(r, "21210")[0] == "21210"          # DART 업종코드가 우선
+    wholesale = score_report(r)
+    assert any("도매업 기준 적용" in f for f in wholesale["flags"])
+    assert wholesale["total_score"] > score_report(_report())["total_score"]
+
+
 def test_감사의견_부적정은_D():
     assert score_report(_report(opinion="부적정"))["credit_grade"] == "D"
 
@@ -182,6 +213,35 @@ def test_기존_매칭_보호():
     assert [r["customer_code"] for r in keep] == ["A1", "A2"]      # 새 거래처 + no_match 갱신
     keep, _ = filter_links(rows, existing, overwrite=True)
     assert [r["customer_code"] for r in keep] == ["A1", "A2", "A4"]  # 수동은 끝까지 보호
+
+
+def _r(file, consolidated=False, report_date="2026-03-23", end="2025-12-31"):
+    return ({"file": file, "meta": {"period_end": end, "consolidated": consolidated,
+                                    "report_date": report_date}}, "X", "corp-map")
+
+
+def test_폴더_안_같은_결산_중복은_하나만_남긴다():
+    # 한 번의 upsert 에 같은 키가 두 번 들어가면 PostgreSQL 이 요청 전체를 거절한다
+    keep, dropped = dedupe_reports([_r("a (1).pdf"), _r("a.pdf"), _r("a - 복사본.pdf")])
+    # 동점이면 원본 이름을 남긴다 — 사본 이름이 source_file 로 남으면 나중에 갱신이 막힌다
+    assert [k[0]["file"] for k in keep] == ["a.pdf"]
+    assert sorted(d[0] for d in dropped) == ["a (1).pdf", "a - 복사본.pdf"]
+
+
+def test_별도와_연결이_둘_다_있으면_별도():
+    keep, dropped = dedupe_reports([_r("연결.pdf", consolidated=True), _r("별도.pdf")])
+    assert keep[0][0]["file"] == "별도.pdf"
+    assert dropped == [("연결.pdf", "별도.pdf", "연결 — 별도 감사보고서를 씀")]
+
+
+def test_같은_결산이면_감사보고서일이_늦은_것():
+    keep, _ = dedupe_reports([_r("old.pdf", report_date="2026-03-01"), _r("new.pdf", report_date="2026-04-10")])
+    assert keep[0][0]["file"] == "new.pdf"
+
+
+def test_결산일이_다르면_둘_다_남긴다():
+    keep, dropped = dedupe_reports([_r("24.pdf", end="2024-12-31"), _r("25.pdf")])
+    assert len(keep) == 2 and dropped == []
 
 
 def test_다른_원본의_같은_결산_평가는_덮지_않는다():

@@ -56,7 +56,8 @@ python -m credit_export.export --folder ./audit_reports --org 1100 --org 1200 --
 
 ```
 감사보고서 3건 평가 · 파싱 실패 0건 · 고유번호 미확인 1건
-  주식회사 지오영         2025-12-31  A     70.2  검증 14/14  (00000001, corp-map)
+  주식회사 지오영         2025-12-31  AA    87.2  검증 14/14  (00000001, corp-map)
+      ⚠ 도매업 기준 적용 (보고서 주석의 사업 목적 → 도매)
       ⚠ 감사시간 39% 감소 (1,831h → 1,115h)
   알보젠코리아 주식회사      2025-12-31  AA    84.5  검증 14/14  (00000002, corp-map)
   아주약품주식회사         2026-03-31  BBB   67.5  검증 17/17  (00000003, corp-map)
@@ -74,6 +75,10 @@ python -m credit_export.export --folder ./audit_reports --org 1100 --org 1200 --
 
 ### 파싱·검증
 - 표지에서 회사명·회계기간을, 재무제표에서 매출액·자산총계를 못 찾으면 그 파일은 건너뛴다.
+- 같은 (고유번호, 결산일) 보고서가 폴더에 여럿이면 하나만 올린다 — **별도 > 연결** → 감사보고서일이
+  늦은 것. 한 번의 upsert 에 같은 키가 둘이면 PostgreSQL 이 요청 전체를 거절하기 때문이다.
+- 감사의견·계속기업 불확실성은 감사보고서 본문의 **단락 제목·결론 문장**으로 판정한다
+  (표준 문단의 "중요한 불확실성이 존재하는지 여부"에는 걸리지 않는다).
 - **회계 항등식이 하나라도 틀리면 등급을 내지 않는다**(`total_score`·`credit_grade` = null).
   대시보드에서는 '미평가'로 보이고, 원인은 `ratios.감사.추출검증` · `ratios.감사.경고` 에 남는다.
 
@@ -95,15 +100,20 @@ python -m credit_export.export --folder ./audit_reports --org 1100 --org 1200 --
 | 활동성 (10) | 매출채권회전일수 60 → 180일, 재고자산회전일수 60 → 180일 |
 
 - 업종 보정: KSIC `46`(도매)은 부채비율 250 → 600%, 영업이익률 3 → 0% 등 완화(매입채무가 큰 저마진 구조).
-  업종 코드는 `dart_companies.induty_code` 또는 OpenDART 기업개황에서 가져온다.
+  업종은 `dart_companies.induty_code` → OpenDART 기업개황 → **보고서 주석 1의 사업 목적 문장**
+  ("의약품 도ㆍ소매업을 목적으로" → 도매, "연구개발, 제조 및 판매" → 제조) 순으로 정한다.
+  ⚠️ 보정 폭이 크다(지오영 A 70.2 → AA 87.2). 기준값은 부도·연체 이력으로 검증되지 않았다.
 - 등급: AAA ≥ 90 · AA ≥ 80 · A ≥ 70 · BBB ≥ 60 · BB ≥ 50 · B ≥ 40 · CCC ≥ 30 · CC ≥ 20 · C
 - 결격: 감사의견 부적정·의견거절 → D, 한정 → BB 이하, 계속기업 불확실성·완전자본잠식 → CCC 이하
 - 전기가 1년이 아니면(신설·분할) 성장성 범주를 빼고 나머지로 가중 평균한다.
 
 ### 거래처 매칭 (`matching.py`)
 - **정확일치**: 법인격(`주식회사` `(주)` `㈜` …)·공백·기호를 뺀 이름이 같다.
-- **유사**: 회사명 뒤에 지점·사업부 표기만 붙었거나(`지오영 부산지점`), 앞 두 글자가 같고 유사도 ≥ 0.9.
-  대시보드는 유사 매칭을 "매칭 확인 필요"로 표시한다.
+- **유사**: 회사명 뒤에 **지역명 + 지점 표기**만 붙었거나(`지오영 부산지점`, `백제약품(주)대구지점`,
+  `지오영(부산)`), 앞 두 글자가 같고 유사도 ≥ 0.9. 대시보드는 유사 매칭을 "매칭 확인 필요"로 표시한다.
+- 회사명 뒤에 다른 이름이 붙으면 붙이지 않는다 — `지오영경동물류센터`(지오영경동은 별개 법인),
+  `아주약품상사`, `지오영케어`. 정당한 지점을 가끔 놓치는 편(수동 매칭으로 보완)이 남의 등급을
+  붙이는 편보다 안전하다.
 - 약국·의원·병원 등으로 끝나는 거래처는 정확일치만 인정한다(`지오영약국` ≠ `지오영`).
 
 ### 기존 데이터 보호
@@ -124,9 +134,20 @@ python -m credit_export.export --folder ./audit_reports --org 1100 --org 1200 --
 전기가 1년이 아니면 `financials` 의 전기에는 재무상태표 항목만 싣는다 — 28일치 매출을 연간 매출
 옆에 두면 대시보드가 '+1,268%' 를 그린다.
 
+`ratios.감사` 에는 감사의견·계속기업 불확실성·강조사항·감사인·회계기준·추출검증·업종(보고서)·
+사업목적·경고가 들어가고, 대시보드는 이 묶음을 재무비율 표가 아니라 기업 헤더에 보인다.
+PostgreSQL jsonb 는 키 순서를 보존하지 않으므로 표시 순서는 대시보드가 정한다.
+
 ## 5. 테스트
 
 ```bash
-python -m pytest tests/test_credit_export.py        # 매칭·고유번호·평가·보호 규칙·REST (PDF 불필요)
-AUDIT_PDF_DIR=/경로 python -m pytest tests/test_parsing_accuracy.py   # 실제 PDF 정확도
+python -m pytest tests/test_credit_export.py tests/test_audit_findings.py   # PDF·DB 불필요
+AUDIT_PDF_DIR=/경로 python -m pytest tests/test_parsing_accuracy.py         # 실제 PDF 정확도
+
+# DB 적재 통합 테스트 — ar-dashboard 와 같은 스키마의 로컬 PostgreSQL (운영 DB 금지)
+tests/setup_test_db.sh /경로/ar-dashboard 54329
+TEST_PG_DSN="host=/tmp port=54329 user=postgres dbname=ar" AUDIT_PDF_DIR=/경로 \
+  python -m pytest tests/test_export_integration.py
 ```
+
+검증에서 찾은 문제와 수정 기록: `docs/verification_log.md`

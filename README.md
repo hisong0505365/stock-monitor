@@ -8,4 +8,5 @@
 - `credit_export/` — 감사보고서 폴더 → 평가 → 거래처 매칭 → 매출채권 대시보드 Supabase 적재
 
 문서: `docs/dart_pdf_analysis.md` (PDF 구조 분석) · `docs/parsing_accuracy.md` (파싱 방법·정확도) ·
-`docs/credit_export.md` (대시보드 연동 사용법)
+`docs/credit_export.md` (대시보드 연동 사용법) ·
+`docs/verification_log.md` (검증 → 개선 기록)

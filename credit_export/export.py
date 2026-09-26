@@ -19,6 +19,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,8 +96,13 @@ def build_ratios(report, score):
     grouped["기타"] = {k: _clean(score["values"].get(k)) for k in EXTRA_RATIOS}
     meta = report["meta"]
     hours = meta.get("audit_hours") or {}
+    business = meta.get("business") or {}
     grouped["감사"] = {
         "감사의견": meta.get("opinion"),
+        "계속기업 불확실성": "있음" if meta.get("going_concern_uncertainty") else "없음",
+        "강조사항": "있음" if meta.get("has_emphasis_of_matter") else "없음",
+        "업종(보고서)": business.get("industry"),
+        "사업목적": (business.get("purpose") or "")[:120] or None,
         "감사인": meta.get("auditor"),
         "회계기준": meta.get("gaap"),
         "감사보고서일": meta.get("report_date"),
@@ -115,7 +121,7 @@ def build_evaluation(report, corp_code, score):
         "period_end": meta["period_end"],
         "report_type": "감사보고서",
         "fiscal_term": str(meta.get("fiscal_term")) if meta.get("fiscal_term") else None,
-        "consolidated": False,
+        "consolidated": bool(meta.get("consolidated")),
         "total_score": score["total_score"],
         "credit_grade": score["credit_grade"],
         "category_scores": score["category_scores"],
@@ -155,6 +161,44 @@ def build_link(customer, corp_code):
         "checked_at": t,
         "updated_at": t,
     }
+
+
+# ===== 폴더 안 중복 =====
+
+def dedupe_reports(resolved):
+    """같은 (고유번호, 결산일) 보고서가 여럿이면 하나만 남긴다
+
+    한 번의 upsert 에 같은 키가 두 번 들어가면 PostgreSQL 이 요청 전체를 거절한다
+    ("ON CONFLICT DO UPDATE command cannot affect row a second time") — 폴더에 '보고서 (1).pdf'
+    사본이 섞이는 것만으로 적재가 통째로 실패했다(2026-09-26 통합 테스트).
+    우선순위: 별도 > 연결 (거래처 법인 자체의 신용을 본다) → 감사보고서일이 늦은 것 → 파일명 순.
+    resolved: [(report, corp_code, source)] → (남긴 것, [(뺀 파일, 남긴 파일, 사유)])
+    """
+    groups = {}
+    for item in resolved:
+        r, corp_code, _ = item
+        groups.setdefault((corp_code, r["meta"]["period_end"]), []).append(item)
+    keep, dropped = [], []
+    for items in groups.values():
+        items.sort(key=lambda it: (bool(it[0]["meta"].get("consolidated")),
+                                   _neg_date(it[0]["meta"].get("report_date")),
+                                   bool(COPY_MARK.search(it[0]["file"])), it[0]["file"]))
+        keep.append(items[0])
+        for other in items[1:]:
+            why = ("연결 — 별도 감사보고서를 씀" if other[0]["meta"].get("consolidated")
+                   and not items[0][0]["meta"].get("consolidated") else "같은 결산의 중복 파일")
+            dropped.append((other[0]["file"], items[0][0]["file"], why))
+    return keep, dropped
+
+
+# '보고서 (1).pdf', '보고서 - 복사본.pdf', 'report copy.pdf' — 동점이면 원본 이름을 남긴다.
+# 사본 이름이 source_file 로 남으면, 사본을 지운 뒤 다시 돌릴 때 '다른 원본의 평가'로 보여 갱신이 막힌다
+COPY_MARK = re.compile(r"\(\d+\)\.pdf$|복사본|사본|copy", re.IGNORECASE)
+
+
+def _neg_date(d):
+    """늦은 날짜가 앞에 오도록 하는 정렬 키 ('2026-03-23' → -20260323, 없으면 맨 뒤)"""
+    return -int(d.replace("-", "")) if d else 0
 
 
 # ===== 기존 데이터 보호 =====
@@ -243,13 +287,18 @@ def run(args, db=None, dart_session=None):
     known = {c["corp_code"] for c in existing_companies}
 
     companies, evaluations, unresolved, summary = {}, [], [], []
-    latest = {}   # 회사명 → 가장 최근 결산 보고서 (거래처 매칭·회사 정보는 최신 기준)
+    resolved = []
     for r in reports:
+        corp_code, source = resolver.resolve(r["meta"]["company"], r["file"])
+        if corp_code:
+            resolved.append((r, corp_code, source))
+        else:
+            unresolved.append((r["file"], r["meta"]["company"], source))
+    resolved, duplicates = dedupe_reports(resolved)
+
+    latest = {}   # 회사명 → 가장 최근 결산 보고서 (거래처 매칭·회사 정보는 최신 기준)
+    for r, corp_code, source in resolved:
         name = r["meta"]["company"]
-        corp_code, source = resolver.resolve(name, r["file"])
-        if not corp_code:
-            unresolved.append((r["file"], name, source))
-            continue
         profile = None
         if api_key and corp_code not in known:
             profile = fetch_company(api_key, corp_code, dart_session)
@@ -316,6 +365,10 @@ def run(args, db=None, dart_session=None):
         "summary": summary,
         "parse_errors": parse_errors,
         "unresolved_corp_codes": unresolved,
+        "duplicates": duplicates,
+        "corp_code_conflicts": [
+            f"{name}: corp-map {code} ≠ Supabase 기존 {', '.join(existing)} — 같은 회사가 둘로 갈라질 수 있음"
+            for name, code, existing in resolver.conflicts],
         "skipped": skipped,
         "dart_companies": list(companies.values()),
         "dart_evaluations": evaluations,
@@ -346,6 +399,10 @@ def print_summary(preview, uploaded):
         print(f"  ✕ {f}: {why}")
     for f, name, why in preview["unresolved_corp_codes"]:
         print(f"  ? {name} ({f}): {why}")
+    for msg in preview.get("corp_code_conflicts", []):
+        print(f"  ⚠ 고유번호 충돌 {msg}")
+    for dropped, kept, why in preview.get("duplicates", []):
+        print(f"  = {dropped}: {why} ({kept} 사용)")
     links = preview["dart_partner_links"]
     print(f"\n거래처 매칭 {len(links)}건 (유사 {sum(l['match_type'] == '유사' for l in links)}건은 대시보드에서 '확인 필요')")
     for l in links:
