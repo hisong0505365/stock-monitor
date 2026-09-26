@@ -180,12 +180,14 @@ pharmacy_finder/
 ├── geo_utils.py                   # 하버사인 거리, 도보시간, 반경 필터
 ├── map_maker.py                   # folium 지도 생성 (마커, 반경 원, 팝업, 클러스터)
 ├── models.py                      # Hospital, Pharmacy 데이터 클래스
+├── demo_data.py                   # 인증키 없이 화면을 확인하는 데모 데이터
 ├── requirements.txt               # streamlit, folium, streamlit-folium, requests, tenacity
 ├── .streamlit/
 │   └── secrets.toml.example       # API 키 템플릿 (실제 secrets.toml은 .gitignore)
 └── tests/
     ├── test_geo_utils.py          # 거리 계산 검증
-    └── test_api_client.py         # 샘플 XML 응답 파싱 검증
+    ├── test_api_client.py         # 샘플 XML 응답 파싱 검증
+    └── test_map_maker.py          # 지도 마커·이스케이프 검증
 ```
 
 ### 6.4 데이터 모델
@@ -278,12 +280,12 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 ### 1단계 — MVP (P0: F1~F6)
 - [ ] 공공데이터포털 API 활용신청 (심평원 병원정보서비스, 심평원 약국정보서비스), 키 발급
-- [ ] `curl`로 두 API 실제 응답 확인 → 샘플 XML을 `tests/`에 저장
-- [ ] `models.py`, `api_client.py` (검색 + XML 파싱 + 캐시)
-- [ ] `geo_utils.py` + `test_geo_utils.py`
-- [ ] `map_maker.py` (병원 마커, 반경 원, 약국 마커, 팝업, `fit_bounds`)
-- [ ] `app.py` 화면 연결 (사이드바 → 요약 카드 → 지도 + 목록)
-- [ ] 예외 처리, 면책 문구
+- [ ] 발급받은 키로 두 API 실제 응답 확인 (필드명이 `api_client.py` 파싱과 맞는지)
+- [x] `models.py`, `api_client.py` (검색 + XML 파싱 + 캐시), 키가 없을 때의 데모 모드
+- [x] `geo_utils.py` + `test_geo_utils.py`
+- [x] `map_maker.py` (병원 마커, 반경 원, 약국 마커, 팝업, `fit_bounds`)
+- [x] `app.py` 화면 연결 (사이드바 → 요약 카드 → 지도 + 목록)
+- [x] 예외 처리, 면책 문구
 
 **완료 기준:** "서울대학교병원" 검색 → 선택 → 반경 500m → 지도에 약국 마커와 거리순 목록이 표시된다.
 
