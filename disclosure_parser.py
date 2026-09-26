@@ -43,9 +43,11 @@ STANDARD_ACCOUNTS = {
         "total_assets": ["자산총계"],
         "current_liabilities": ["유동부채"],
         "payables": ["매입채무및기타채무", "매입채무"],
-        "short_term_borrowings": ["단기차입금", "차입부채"],
-        "current_portion_ltd": ["유동성장기차입금", "유동성장기부채"],
-        "long_term_borrowings": ["장기차입금"],
+        # '구간:계정' — 같은 이름이 유동/비유동에 모두 있는 계정(알보젠 '차입부채')은 구간으로 가른다
+        "short_term_borrowings": ["단기차입금", "유동부채:차입부채", "유동부채:차입금"],
+        "current_portion_ltd": ["유동성장기차입금", "유동성장기부채", "유동성사채"],
+        "long_term_borrowings": ["장기차입금", "비유동부채:차입부채", "비유동부채:차입금"],
+        "bonds": ["사채", "비유동부채:사채"],
         "current_lease_liabilities": ["유동리스부채"],
         "non_current_lease_liabilities": ["비유동리스부채"],
         "non_current_liabilities": ["비유동부채"],
@@ -81,9 +83,13 @@ EXPENSE_KEYS = {"cost_of_sales", "sga", "interest_expense", "interest_paid",
                 "dividends_paid"}
 
 # 유형자산 취득(CAPEX): 백제약품처럼 토지/건물/비품 취득으로 쪼개진 경우 합산
+# 백제약품은 '건설중인자산의 증가'로 적는다 — '취득'만 보면 설비투자가 빠진다
 CAPEX_PATTERN = re.compile(
     r"^(유형자산|토지|건물|구축물|기계장치|차량운반구|비품|공구와기구|"
-    r"건설중인자산|시설장치|집기비품|공기구비품)의?취득$")
+    r"건설중인자산|시설장치|집기비품|공기구비품)의?(취득|증가)$")
+
+# 재무상태표 구간 표시 행 — 같은 이름의 계정을 유동/비유동으로 가를 때 쓴다
+BS_SECTIONS = {"자산", "유동자산", "비유동자산", "부채", "유동부채", "비유동부채", "자본"}
 
 # ===== 문자열 정규화 =====
 
@@ -371,10 +377,23 @@ def _extract_audit_hours(doc):
 
 # ===== 표준 계정 추출 =====
 
+def _with_sections(rows):
+    """행마다 속한 재무상태표 구간(유동부채 등)을 붙인다"""
+    section, out = None, []
+    for r in rows:
+        if r["account"] in BS_SECTIONS:
+            section = r["account"]
+        out.append((section, r))
+    return out
+
+
 def _find(rows, candidates):
+    """후보 순서대로 첫 일치 행. '구간:계정' 후보는 그 구간 안에서만 찾는다"""
+    sectioned = _with_sections(rows)
     for cand in candidates:
-        for r in rows:
-            if r["account"] == cand and r["values"]:
+        section, _, name = cand.rpartition(":")
+        for sec, r in sectioned:
+            if r["account"] == name and r["values"] and (not section or sec == section):
                 return r
     return None
 
@@ -467,7 +486,7 @@ def compute_ratios(std, period="당기", prev="전기", days=365, prev_days=365)
     comparable = prev_days >= days * 0.9
     borrowings = sum(v for v in (
         g("short_term_borrowings"), g("current_portion_ltd"), g("long_term_borrowings"),
-        g("current_lease_liabilities"), g("non_current_lease_liabilities")) if v)
+        g("bonds"), g("current_lease_liabilities"), g("non_current_lease_liabilities")) if v)
     interest = g("interest_expense") or g("interest_paid")
     cfo, capex = g("cfo"), g("capex")
     ratios = {
