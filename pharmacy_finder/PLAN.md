@@ -279,8 +279,8 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 ## 9. 개발 단계
 
 ### 1단계 — MVP (P0: F1~F6)
-- [ ] 공공데이터포털 API 활용신청 (심평원 병원정보서비스, 심평원 약국정보서비스), 키 발급
-- [ ] 발급받은 키로 두 API 실제 응답 확인 (필드명이 `api_client.py` 파싱과 맞는지)
+- [x] 공공데이터포털 API 활용신청 (심평원 병원정보서비스, 심평원 약국정보서비스), 키 발급
+- [x] 발급받은 키로 두 API 실제 응답 확인 (필드명이 `api_client.py` 파싱과 맞는지)
 - [x] `models.py`, `api_client.py` (검색 + XML 파싱 + 캐시), 키가 없을 때의 데모 모드
 - [x] `geo_utils.py` + `test_geo_utils.py`
 - [x] `map_maker.py` (병원 마커, 반경 원, 약국 마커, 팝업, `fit_bounds`)
