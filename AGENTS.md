@@ -8,6 +8,7 @@
 | 영역 | 파일 | 상태 |
 |---|---|---|
 | 주식 모니터링 앱(기존) | `app.py` · `stock_analyzer.py` · `data_collector.py` · `chart_maker.py` | 이번 작업에서 손대지 않음 |
+| 병원 근처 약국 찾기(별도 앱) | `pharmacy_finder/` | 자체 규칙은 `pharmacy_finder/CLAUDE.md` — 테스트도 그 폴더에서 `python -m pytest` |
 | 감사보고서 파서 | `disclosure_parser.py` | DART 감사보고서 PDF → 재무제표·감사의견·업종·재무비율 |
 | 정확도 검증 · OCR | `parsing_accuracy.py` | 좌표 기반 독립 추출기, OCR(2단계 · 스캔 조건) |
 | 대시보드 연동 | `credit_export/` | 폴더 → 평가 → 거래처 매칭 → ar-dashboard Supabase 0008 테이블 |
