@@ -14,6 +14,7 @@
 # 안다고 쳤을 때 OCR 이 숫자를 얼마나 맞게 읽는가"의 상한이다.
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,7 +34,10 @@ pymupdf.no_recommend_layout()
 
 TARGET = ("BS", "IS", "CF")          # 자본변동표는 열이 기간이 아니라 자본 구성요소라 제외
 AMOUNT = re.compile(r"^\(?-?[\d,]+\)?$|^[-－—]$")
-NOTE_REF = re.compile(r"^\d{1,2}(,\s?\d{1,2})*,?$")   # 주석 번호: '4,' '5,' '14' '6,26,32'
+# 주석 번호: '4,' '5,' '14' '6,26,32'. OCR 은 쉼표를 '.' 으로 읽기도 한다('4.5,14')
+NOTE_REF = re.compile(r"^\d{1,2}([,.]\s?\d{1,2})*[,.]?$")
+# OCR 이 로마숫자 머리표(Ⅰ. Ⅱ. Ⅳ. Ⅶ. Ⅸ.)를 '|.' 'Il.' 'iI.' 'LL.' 'I].' '1/.' 'Vil,' 'IX,' 로 읽은 것
+OCR_ROMAN_PREFIX = re.compile(r"^[|lIiLVvXx\]\[!1/\\]{1,4}[.,]")
 ROW_TOL = 3        # 같은 줄로 볼 y 차이
 WRAP_GAP = 12      # 이보다 가까운 줄은 한 행(계정명 줄바꿈). 일반 행 간격은 14~17pt
 EDGE_TOL = 4       # 오른쪽 정렬 열 경계 허용 오차
@@ -47,57 +51,164 @@ def words_from_text_layer(page):
     return [w for w in words if w[4]]
 
 
-def _remove_table_lines(gray):
-    """표 테두리 제거 — 선이 남아 있으면 Tesseract 가 표 영역을 통째로 깨진 글자로 읽는다"""
+def _long_runs(dark, length, axis):
+    """axis 방향으로 length 픽셀 이상 이어진 어두운 픽셀 (1차원 열림 연산: 침식 → 팽창)"""
     import numpy as np
+    d = np.moveaxis(dark, axis, 0).astype(np.int32)
+    c = np.concatenate([np.zeros((1, d.shape[1]), np.int32), np.cumsum(d, axis=0)])
+    n = d.shape[0]
+    core = np.zeros_like(d, dtype=bool)                      # 길이 length 창이 전부 어두운 시작점
+    core[:n - length + 1] = (c[length:] - c[:n - length + 1]) == length
+    cc = np.concatenate([np.zeros((1, d.shape[1]), np.int32), np.cumsum(core, axis=0)])
+    idx = np.arange(n)
+    lo = np.clip(idx - length + 1, 0, n)                     # 이 픽셀을 덮는 창 시작점 범위
+    covered = (cc[idx + 1] - cc[lo]) > 0
+    return np.moveaxis(covered, 0, axis)
+
+
+def _remove_table_lines(gray, min_len_pt=20, dpi=300):
+    """표 테두리 제거 — 선이 남아 있으면 Tesseract 가 표 영역을 통째로 깨진 글자로 읽는다
+
+    예전에는 '어두운 픽셀 합이 높이의 15% 를 넘는 세로줄' 을 선으로 봤는데, 오른쪽 정렬된 금액은
+    같은 자리 숫자('1' 의 세로획)가 수십 행에 걸쳐 같은 x 에 놓여 그 기준을 넘는다 → 숫자 획이
+    지워져 '1'→'7', '3'→'8' 오인식의 주원인이 됐다(2026-09-27 발견). 이제는 실제로 끊김 없이
+    min_len_pt(글자 높이의 2배 이상) 넘게 이어진 선만 지운다.
+    """
+    import numpy as np
+    dark = gray < 200                                          # 안티에일리어싱된 선 가장자리까지
+    length = int(min_len_pt * dpi / 72)
+    lines = _long_runs(dark, length, 0) | _long_runs(dark, length, 1)
+    # 선 옆 1픽셀 번짐까지
+    lines[1:] |= lines[:-1]; lines[:-1] |= lines[1:]
+    lines[:, 1:] |= lines[:, :-1]; lines[:, :-1] |= lines[:, 1:]
     a = gray.copy()
-    dark = a < 160
-    h, w = a.shape
-    a[dark.sum(axis=1) > w * 0.4, :] = 255     # 가로선
-    a[:, dark.sum(axis=0) > h * 0.15] = 255    # 세로선
+    a[lines] = 255
     return a
+
+
+# Tesseract 의 OpenMP 다중 스레드는 여러 개를 함께 돌리면 서로 CPU 를 기다리며 수십 배
+# 느려진다(4코어에서 5건 동시 실행 시 10분 넘게 멈춤). 한 스레드로 돌리고 병렬은 프로세스로 한다
+_TESS_ENV = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+
+# 금액 0 을 뜻하는 '-' 를 한국어 모델은 'ㆍ'(가운뎃점)·'一' 등으로 읽는다(아주약품 포괄손익)
+DASH_LIKE = {"ㆍ", "·", "•", "—", "–", "―", "ー", "一", "_", "－"}
 
 
 def words_from_ocr(page, dpi=300, lang="kor+eng", clean_lines=True):
     """Tesseract TSV → PDF 좌표계(pt) 단어 목록"""
-    import numpy as np
     from PIL import Image
-    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
-    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-    if clean_lines:
-        gray = _remove_table_lines(gray)
+    gray = _render_gray(page, dpi, clean_lines)
     scale = 72 / dpi
     with tempfile.TemporaryDirectory() as tmp:
         img = Path(tmp) / "page.png"
         Image.fromarray(gray).save(img)
         out = subprocess.run(
             ["tesseract", str(img), "stdout", "-l", lang, "--psm", "6", "tsv"],
-            capture_output=True, text=True, check=True).stdout
+            capture_output=True, text=True, check=True, env=_TESS_ENV).stdout
     words = []
     for line in out.splitlines()[1:]:
         cols = line.split("\t")
         if len(cols) < 12 or not cols[11].strip():
             continue
         left, top, width, height = (int(c) for c in cols[6:10])
+        text = cols[11].strip()
         words.append((left * scale, top * scale, (left + width) * scale,
-                      (top + height) * scale, cols[11].strip()))
+                      (top + height) * scale, "-" if text in DASH_LIKE else text))
     return words
 
 
 _OCR_NUMERIC = re.compile(r"^[\d,.()\-]+$")
+DIGITS_ONLY = "tessedit_char_whitelist=0123456789,()-"
+
+
+def _render_gray(page, dpi, clean_lines=True):
+    import numpy as np
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
+    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    return _remove_table_lines(gray, dpi=dpi) if clean_lines else gray
+
+
+def _ocr_line(img, lang="eng"):
+    """이미지 한 조각을 한 줄(psm 7)·숫자 문자만으로 읽는다"""
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cell.png"
+        Image.fromarray(img).save(path)
+        return subprocess.run(
+            ["tesseract", str(path), "stdout", "-l", lang, "--psm", "7", "-c", DIGITS_ONLY],
+            capture_output=True, text=True, env=_TESS_ENV,
+        ).stdout.strip().replace(" ", "")
+
+
+# 1단계가 숫자 사이에 잡문자를 끼워 읽은 칸('6,/98,809,489')도 재판독 대상
+_NUMERIC_LIKE = re.compile(r"^[\d,.()\-/|lIoO]+$")
+
+
+def _numeric_like(text):
+    return bool(_NUMERIC_LIKE.match(text)) and sum(c.isdigit() for c in text) >= len(text) / 2
+
+
+def reread_numbers(page, words, x_min, dpi=300, tiebreak_dpi=400, workers=4):
+    """2단계 OCR: 1단계(페이지 전체 OCR)가 찾은 금액 칸만 잘라 다시 읽는다
+
+    페이지를 통째로 읽으면 주변 글자 문맥에 끌린 오답이 섞인다. 같은 칸을 잘라 한 줄
+    모드·숫자 문자(0-9 , ( ) -)만으로 다시 읽는다. 1단계와 2단계가 다르면 설정을 바꿔
+    (다른 해상도 · 한국어 모델) 두 번 더 읽어 다수결로 정한다 — 설정마다 틀리는 칸이 달라서
+    (인천약품 '2,520,675,257': 300dpi 영문 2,920 · 400dpi 영문 2,020 · 한영 2,520) 표가
+    갈리면 정답이 남는다. 동점이면 2단계 값. 1단계는 숫자가 '어디' 있는지를 주로 쓴다.
+    """
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor
+    images = {d: _render_gray(page, d) for d in (dpi, tiebreak_dpi)}
+    targets = [i for i, w in enumerate(words) if w[2] > x_min and _numeric_like(w[4])]
+
+    def read(i, d, lang="eng"):
+        w, s, gray = words[i], d / 72, images[d]
+        x0, y0 = max(int((w[0] - 4) * s), 0), max(int((w[1] - 3) * s), 0)
+        x1, y1 = int((w[2] + 4) * s), int((w[3] + 3) * s)
+        text = _ocr_line(np.pad(gray[y0:y1, x0:x1], 20, constant_values=255), lang)
+        return text if text and _OCR_NUMERIC.match(text) else None
+
+    with ThreadPoolExecutor(workers) as pool:
+        second = dict(zip(targets, pool.map(lambda i: read(i, dpi), targets)))
+        first = {i: words[i][4] if _OCR_NUMERIC.match(words[i][4]) else None for i in targets}
+        disputed = [i for i in targets if second[i] != first[i] and first[i] and second[i]]
+        extra = dict(zip(disputed, pool.map(
+            lambda i: (read(i, tiebreak_dpi), read(i, dpi, "kor+eng")), disputed)))
+    out = list(words)
+    for i in targets:
+        votes = [v for v in (first[i], second[i], *extra.get(i, ())) if v]
+        if not votes:
+            continue
+        best = max(set(votes), key=lambda v: (votes.count(v), v == second[i]))
+        out[i] = (*words[i][:4], best)
+    return out
 
 
 def merge_numeric_fragments(words, gap=6):
-    """OCR 후처리: '3,309,341' + '062,502)' 처럼 공백으로 갈라진 숫자 조각을 합친다"""
+    """OCR 후처리: '3,309,341' + '062,502)' 처럼 공백으로 갈라진 숫자 조각을 합친다
+
+    Tesseract 는 한 숫자를 겹친 두 조각('3,935,304,' 과 그 위에 겹친 '799')으로 내기도 한다.
+    쉼표로 끝난 조각 뒤에 겹쳐 온 조각은 이어 붙이고, 그 밖의 겹침은 긴 쪽을 남긴다.
+    """
+    # 같은 줄은 y 중심을 이어 묶는다 — y 를 고정 간격으로 반올림하면 436.4 와 436.8 처럼
+    # 같은 높이의 조각이 다른 줄로 갈린다(지오영)
     out = []
-    for w in sorted(words, key=lambda w: (round((w[1] + w[3]) / 2 / ROW_TOL), w[0])):
-        if (out and _OCR_NUMERIC.match(w[4]) and _OCR_NUMERIC.match(out[-1][4])
-                and abs((out[-1][1] + out[-1][3]) / 2 - (w[1] + w[3]) / 2) <= ROW_TOL
-                and 0 <= w[0] - out[-1][2] <= gap):
-            p = out[-1]
-            out[-1] = (p[0], min(p[1], w[1]), w[2], max(p[3], w[3]), p[4] + w[4])
-        else:
-            out.append(w)
+    for row in _visual_rows(words):
+        merged = []
+        for w in row["words"]:                                  # x 순
+            p = merged[-1] if merged else None
+            if (p and _OCR_NUMERIC.match(w[4]) and _OCR_NUMERIC.match(p[4])
+                    and p[0] <= w[0] <= p[2] + gap):             # 앞 조각 안이나 바로 뒤에서 시작
+                box = (p[0], min(p[1], w[1]), max(p[2], w[2]), max(p[3], w[3]))
+                if w[0] >= p[2] or p[4].endswith(","):
+                    text = p[4] + w[4]
+                else:
+                    text = max(p[4], w[4], key=len)
+                merged[-1] = (*box, text)
+            else:
+                merged.append(w)
+        out.extend(merged)
     return out
 
 
@@ -129,9 +240,16 @@ def _visual_rows(words):
 
 
 def _find_header(rows):
-    for i, r in enumerate(rows):
-        text = squash("".join(w[4] for w in r["words"]))
+    texts = [squash("".join(w[4] for w in r["words"])) for r in rows]
+    for i, text in enumerate(texts):
         if text.startswith("과목") or text.startswith("구분"):
+            return i
+    # OCR: '과 목' 을 '과 =' · 'HOS' 등으로 읽는다 — 기간 머리글('제21(당)기')이 둘 이상 있거나
+    # '과' 로 시작하고 하나 있으면 머리글. 표지의 기간 줄은 줄마다 하나뿐이다.
+    # (두 줄 머리글의 윗줄도 기간이 둘일 수 있어 '과목' 을 먼저 찾는다 — 아주약품 재무상태표)
+    for i, text in enumerate(texts):
+        periods = len(re.findall(r"제\d+", text))
+        if periods >= 2 or (text.startswith("과") and periods):
             return i
     return None
 
@@ -149,14 +267,45 @@ def _period_headers(header_words, label_end):
             groups[-1]["x1"] = max(groups[-1]["x1"], w[2])
         else:
             groups.append({"words": [w], "x0": w[0], "x1": w[2]})
-    headers = []
+    headers, unknown = [], []
     for g in groups:
-        text = " ".join(w[4] for w in sorted(g["words"], key=lambda w: (w[1], w[0])))
-        # '목'(과 목 사이 공백으로 떨어진 글자)·'주석' 은 기간이 아니다
-        if not re.search(r"제\d+|\((당|전)\)|기초|기말", squash(text)):
-            continue
-        headers.append({"label": _period_label(text), "x0": g["x0"], "x1": g["x1"]})
-    return headers
+        # 줄 순서 → 줄 안 x 순서. 윗변 y 로 정렬하면 OCR 글자 조각('제' '21(' '당' ')' '기')이 섞인다
+        text = " ".join(w[4] for r in _visual_rows(g["words"]) for w in r["words"])
+        h = {"label": _period_label(text), "x0": g["x0"], "x1": g["x1"],
+             "term": next(iter(re.findall(r"제(\d+)", squash(text))), None)}
+        if h["label"] in PERIODS:
+            headers.append(h)
+        elif re.search(r"제\d+|기초|기말", squash(text)):
+            headers.append(h)                   # '제 1 기말' 처럼 (당)(전) 없이 쓴 머리글
+        else:
+            unknown.append(h)                   # '목' 조각, OCR 로 깨진 머리글('mre)!')
+    return _resolve_periods(headers, unknown)
+
+
+PERIODS = {"당기", "전기", "당기초", "전기초", "전전기"}
+
+
+def _resolve_periods(headers, unknown):
+    """OCR 로 '(당)'·'(전)' 을 못 읽은 기간 머리글 채우기 — 텍스트 레이어에서는 할 일이 없다
+
+    · '제40(&)기' 처럼 기수는 읽었으면 기수로: 당기 기수와 같으면 당기, 하나 작으면 전기
+    · 머리글이 통째로 깨졌으면('mre)!') 기간 영역 안에 있을 때만, 당기·전기 중 빠진 쪽으로
+    """
+    known = {h["term"]: h["label"] for h in headers if h["label"] in ("당기", "전기") and h["term"]}
+    current = next((int(t) for t, lab in known.items() if lab == "당기"), None)
+    if current is None:
+        current = next((int(t) + 1 for t, lab in known.items() if lab == "전기"), None)
+    for h in headers:
+        if h["label"] not in PERIODS and h["term"] and current is not None:
+            h["label"] = {current: "당기", current - 1: "전기"}.get(int(h["term"]), h["label"])
+    labels = {h["label"] for h in headers}
+    if headers and len(labels & {"당기", "전기"}) == 1 and len(unknown) >= 1:
+        start = min(h["x0"] for h in headers)
+        inside = [u for u in unknown if u["x0"] > start]
+        if len(inside) == 1:
+            inside[0]["label"] = "전기" if "당기" in labels else "당기"
+            headers.append(inside[0])
+    return [{k: h[k] for k in ("label", "x0", "x1")} for h in sorted(headers, key=lambda h: h["x0"])]
 
 
 def _column_edges(rows, period_x0):
@@ -239,7 +388,9 @@ def _rows_to_records(pno, rows, layout, amount_parser):
     records = []
     for r in logical:
         label, values = [], {}
-        for w in sorted(r["words"], key=lambda w: (w[1], w[0])):
+        # 줄 순서 → 줄 안 x 순서 그대로 (_visual_rows 가 줄마다 x 로 정렬해 둠). 윗변 y 로 다시
+        # 정렬하면 글자마다 높이가 다른 OCR 한글이 '기초상품재고액' → '기상재액초품고' 로 섞인다
+        for w in r["words"]:
             text = w[4]
             if w[2] > x0 and (AMOUNT.match(text) or _OCR_NUMERIC.match(text)):
                 col = min(range(len(layout["edges"])), key=lambda i: abs(layout["edges"][i] - w[2]))
@@ -252,7 +403,7 @@ def _rows_to_records(pno, rows, layout, amount_parser):
                 continue   # 주석 번호 열
             elif w[0] < x0:
                 label.append(text)
-        account, _ = normalize_account(" ".join(label))
+        account, _ = normalize_account(OCR_ROMAN_PREFIX.sub("", "".join(label)))
         if account or values:
             records.append({"page": pno + 1, "y": round(r["y"], 1),
                             "account": account, "values": values})
@@ -333,6 +484,35 @@ def label_accuracy(reference, candidate, y_tol=5):
             "mean_similarity": round(sum(ratios) / n, 4) if n else None, "wrong": wrong}
 
 
+def _evaluate_ocr(doc, pages, layouts, text_rows):
+    """OCR 세 가지 조건을 텍스트 레이어 행과 칸 단위로 비교
+
+    ocr_values   1단계(페이지 전체 OCR) · 열 배치는 텍스트 레이어에서 빌림 — 2026-09-26 기준선과 같은 조건
+    ocr2_values  2단계(금액 칸 재판독) · 열 배치 빌림
+    scan_values  2단계 · 열 배치도 OCR 로 찾음 — 텍스트 레이어가 없는 스캔 PDF 와 같은 조건
+    """
+    out = {}
+    ocr_words = [(p, merge_numeric_fragments(words_from_ocr(doc[p]))) for p in pages]
+    ocr_rows = extract_by_coordinates(ocr_words, layouts, parse_amount_lenient)
+    out["ocr_values"] = compare_by_position(text_rows, ocr_rows)
+    out["ocr_labels"] = label_accuracy(text_rows, ocr_rows)
+    try:
+        scan_layouts = detect_layouts(ocr_words)
+    except ValueError as e:
+        scan_layouts, out["scan_error"] = {}, str(e)
+    reread = []
+    for p, words in ocr_words:
+        layout = scan_layouts.get(p) or layouts.get(p)
+        if layout:
+            reread.append((p, reread_numbers(doc[p], words, layout["period_x0"])))
+    out["ocr2_values"] = compare_by_position(
+        text_rows, extract_by_coordinates(reread, layouts, parse_amount_lenient))
+    scan_rows = extract_by_coordinates(reread, scan_layouts, parse_amount_lenient)
+    out["scan_values"] = compare_by_position(text_rows, scan_rows)
+    out["scan_labels"] = label_accuracy(text_rows, scan_rows)
+    return out
+
+
 def evaluate(path, ocr=False):
     doc = pymupdf.open(path)
     parser_rows = extract_statements(doc)
@@ -344,10 +524,7 @@ def evaluate(path, ocr=False):
         entry = {"pages": [p + 1 for p in pages],
                  "parser_vs_coordinates": compare_triples(parser_rows[stype]["rows"], text_rows)}
         if ocr:
-            ocr_words = [(p, merge_numeric_fragments(words_from_ocr(doc[p]))) for p in pages]
-            ocr_rows = extract_by_coordinates(ocr_words, layouts, parse_amount_lenient)
-            entry["ocr_values"] = compare_by_position(text_rows, ocr_rows)
-            entry["ocr_labels"] = label_accuracy(text_rows, ocr_rows)
+            entry.update(_evaluate_ocr(doc, pages, layouts, text_rows))
         report["statements"][stype] = entry
     return report
 

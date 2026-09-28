@@ -51,11 +51,15 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _clean(v):
-    """JSON 에 못 싣는 값 정리 — inf 는 '상환불가' 로, 소수는 둘째 자리까지"""
+# 무한대 지표를 대시보드에 보일 말 — JSON 에는 inf 를 실을 수 없다
+INF_LABELS = {"차입금상환기간(년)": "상환불가(영업CF≤0)", "부채비율(%)": "자본잠식"}
+
+
+def _clean(v, name=None):
+    """JSON 에 못 싣는 값 정리 — inf 는 지표별 설명으로, 소수는 둘째 자리까지"""
     if isinstance(v, float):
         if math.isinf(v):
-            return "상환불가(영업CF≤0)"
+            return INF_LABELS.get(name, "산출불가")
         if math.isnan(v):
             return None
         return round(v, 2)
@@ -92,8 +96,8 @@ def build_ratios(report, score):
     """{범주: {지표: 값}} — 대시보드 normalizeRatios 의 '한 단계 묶음' 모양"""
     grouped = {}
     for m in score["metrics"]:
-        grouped.setdefault(m["범주"], {})[m["지표"]] = _clean(m["값"])
-    grouped["기타"] = {k: _clean(score["values"].get(k)) for k in EXTRA_RATIOS}
+        grouped.setdefault(m["범주"], {})[m["지표"]] = _clean(m["값"], m["지표"])
+    grouped["기타"] = {k: _clean(score["values"].get(k), k) for k in EXTRA_RATIOS}
     meta = report["meta"]
     hours = meta.get("audit_hours") or {}
     business = meta.get("business") or {}

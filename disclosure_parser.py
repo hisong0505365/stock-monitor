@@ -84,9 +84,10 @@ EXPENSE_KEYS = {"cost_of_sales", "sga", "interest_expense", "interest_paid",
 
 # 유형자산 취득(CAPEX): 백제약품처럼 토지/건물/비품 취득으로 쪼개진 경우 합산
 # 백제약품은 '건설중인자산의 증가'로 적는다 — '취득'만 보면 설비투자가 빠진다
+# 복산나이스·인천약품은 '기타의유형자산의 증가/취득' 줄이 따로 있다. '기타무형자산'은 제외
 CAPEX_PATTERN = re.compile(
-    r"^(유형자산|토지|건물|구축물|기계장치|차량운반구|비품|공구와기구|"
-    r"건설중인자산|시설장치|집기비품|공기구비품)의?(취득|증가)$")
+    r"^(기타의?)?(유형자산|토지|건물|구축물|기계장치|차량운반구|비품|공구와기구|"
+    r"건설중인자산|시설장치|집기비품|공기구비품|공구기구|기구비품)의?(취득|증가)$")
 
 # 재무상태표 구간 표시 행 — 같은 이름의 계정을 유동/비유동으로 가를 때 쓴다
 BS_SECTIONS = {"자산", "유동자산", "비유동자산", "부채", "유동부채", "비유동부채", "자본"}
@@ -105,7 +106,9 @@ PREFIX_PATTERNS = [
     (4, re.compile(r"^[①-⑳]\s*")),
 ]
 
-NOTE_REF = re.compile(r"\(주석[\d,\s]*\)")
+# 계정명 뒤 주석 참조: '(주석17)', '(주석7,17,19)', '(주석3과6)'·'(주석3,4와6)'(인천약품),
+# '(주7)'(경동사), '(주석6.18,19)'(OCR 이 쉼표를 '.' 으로 읽음)
+NOTE_REF = re.compile(r"\((주석|주)\s*\d[\d\s,.과와및~\-]*\)")
 
 
 def normalize_account(raw):
@@ -120,8 +123,9 @@ def normalize_account(raw):
             level = lv
             s = s[m.end():]
             break
-    s = NOTE_REF.sub("", s)
+    # 공백을 먼저 없앤다 — OCR 은 한글을 글자 단위로 내놔 '( 주 석 3)' 처럼 띄어진다
     s = re.sub(r"\s+", "", s)
+    s = NOTE_REF.sub("", s)
     return s, level
 
 
@@ -267,6 +271,21 @@ def extract_statements(doc):
 
 # ===== 메타데이터 (표지, 감사의견, 감사시간) =====
 
+LEGAL_FORM_IN_NAME = re.compile(r"주식회사|유한회사|\(주\)|㈜|\(유\)")
+COVER_TITLE = re.compile(r"재무제표에대한|감사보고서|회계법인|^제\d+|^\d{4}년|전자공시시스템|^Page")
+
+
+def _cover_company(lines):
+    """표지에서 회사명 — 보통 첫 줄이지만 제목이 먼저 오는 표지도 있다(티제이팜)
+
+    법인격(주식회사·(주) 등)이 붙은 줄을 먼저 찾고, 없으면 제목·기간·감사인이 아닌 첫 줄.
+    """
+    for l in lines:
+        if LEGAL_FORM_IN_NAME.search(l) and not COVER_TITLE.search(squash(l)):
+            return l
+    return next((l for l in lines if not COVER_TITLE.search(squash(l))), None)
+
+
 PERIOD_RE = re.compile(
     r"제(\d+)(?:\((당|전)\))?기(\d{4})년(\d{2})월(\d{2})일부터(\d{4})년(\d{2})월(\d{2})일까지")
 DATE_RE = re.compile(r"(\d{4})년(\d{1,2})월(\d{1,2})일")
@@ -294,8 +313,7 @@ def extract_metadata(doc):
     audit_flat = squash("".join(doc[i].get_text() for i in range(1, attach_idx or 1)))
 
     lines = [l.strip() for l in cover.split("\n") if l.strip()]
-    if lines:
-        meta["company"] = lines[0]
+    meta["company"] = _cover_company(lines)
     # 표지 제목: '재무제표에 대한 감사보고서'(별도) / '연결재무제표에 대한 감사보고서'(연결)
     meta["consolidated"] = "연결재무제표에대한" in squash(cover)
     for l in lines:
@@ -385,7 +403,8 @@ def audit_findings(audit_text):
 # 쓰므로 주석 전체가 아니라 **사업 목적 문장** 안에서만 판정한다.
 
 PURPOSE_SENTENCE = re.compile(
-    r"[^.。]*(목적으로|목적사업|사업목적|주요사업내용|주요\s*사업\s*내용|영위)[^.。]*")
+    r"[^.。]*(목적으로|목적사업|사업목적|주요사업내용|주요\s*사업\s*내용|영위|"
+    r"영업으로|사업으로)[^.。]*")   # '의약품 종합 도매업을 주된 영업으로'(인천약품)
 MANUFACTURING = re.compile(r"제조|생산|연구개발")
 WHOLESALE = re.compile(r"도매|도ㆍ소매|도·소매|도소매|유통|판매업|수출입|수입")
 
@@ -568,6 +587,12 @@ def compute_ratios(std, period="당기", prev="전기", days=365, prev_days=365)
         if g("revenue", prev) and comparable else None,
     }
     ratios = {k: (v * 100 if v is not None else None) for k, v in ratios.items()}
+    # 자본잠식(자본총계 ≤ 0): 부채/자본은 음수가 되어 '부채비율 -2,560%' 처럼 가장 좋은 값으로
+    # 읽히고(경동사), 순손실/음수 자본은 'ROE +95%' 가 된다. 부채비율은 무한대(최악), ROE 는 의미 없음
+    equity = g("total_equity")
+    if equity is not None and equity <= 0:
+        ratios["부채비율(%)"] = float("inf") if g("total_liabilities") else None
+        ratios["ROE(%)"] = None
     ratios["이자보상배율(배)"] = _div(g("operating_income"), interest)
     ratios["매출채권회전일수"] = _div((g("receivables") or 0) * days, g("revenue"))
     ratios["재고자산회전일수"] = _div((g("inventories") or 0) * days, g("cost_of_sales"))
@@ -612,4 +637,7 @@ if __name__ == "__main__":
     for pdf in sys.argv[1:]:
         result = parse_audit_report(pdf)
         result.pop("_raw")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        # JSON 표준에는 무한대가 없다 — 자본잠식의 부채비율(무한대)은 글자로
+        result["ratios"] = {k: ("자본잠식" if v == float("inf") else v)
+                            for k, v in result["ratios"].items()}
+        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

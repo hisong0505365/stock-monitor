@@ -3,7 +3,8 @@
 # 필요한 것
 #   TEST_PG_DSN   ar-dashboard supabase/migrations 를 적용한 PostgreSQL (Supabase auth 스텁 포함)
 #                 — 이 테스트는 dart_* · customers 테이블을 비우고 다시 채운다. 운영 DB 금지.
-#   AUDIT_PDF_DIR 감사보고서 PDF 4건
+#   AUDIT_PDF_DIR 감사보고서 PDF — 지오영·알보젠코리아·아주약품·백제약품 4건은 반드시.
+#                 그 밖의 보고서(고유번호를 못 찾는 회사)는 올리지 않고 보류돼야 한다
 import argparse
 import os
 import random
@@ -164,8 +165,11 @@ def test_사본과_감사보고서가_아닌_PDF가_섞인_폴더(db, tmp_path):
     folder.mkdir()
     for pdf in Path(PDF_DIR).glob("*.pdf"):
         (folder / pdf.name).symlink_to(pdf)
-    first = sorted(Path(PDF_DIR).glob("*.pdf"))[0]
-    (folder / "보고서 사본 (1).pdf").symlink_to(first)
+    # 적재되는 회사의 보고서를 복사해야 중복 정리를 지난다 — 이름순 첫 파일은 폴더 구성에 따라
+    # 고유번호가 없는 회사일 수 있다(보류돼 중복 검사까지 가지 않음)
+    geoyoung = (sorted(Path(PDF_DIR).glob("46d30305*.pdf"))
+                or sorted(Path(PDF_DIR).glob("*지오영*.pdf")))[0]
+    (folder / "보고서 사본 (1).pdf").symlink_to(geoyoung)
     import pymupdf
     junk = pymupdf.open()
     junk.new_page().insert_text((72, 72), "invoice")

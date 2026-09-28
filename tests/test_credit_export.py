@@ -6,7 +6,8 @@ import pytest
 
 from credit_export.corp_codes import CorpCodeResolver, parse_corp_code_xml
 from credit_export.export import (
-    _clean, build_financials, build_link, dedupe_reports, filter_evaluations, filter_links,
+    _clean, build_financials, build_link, build_ratios, dedupe_reports, filter_evaluations,
+    filter_links,
 )
 from credit_export.matching import match_customers, match_one, normalize_company_name
 from credit_export.scoring import cap_grade, grade_for, industry_code, score_report
@@ -165,6 +166,22 @@ def test_계속기업_불확실성은_CCC_이하():
     assert s["credit_grade"] in ("CCC", "CC", "C", "D")
 
 
+def test_자본잠식이면_부채비율은_최하점_ROE_는_비운다():
+    """경동사(2025): 자본총계 -42억 → 부채비율 -2,560% 가 만점, ROE +95% 로 계산되던 문제(2026-09-27)"""
+    r = _report()
+    r["standard"]["total_equity"] = {"당기": -4_237, "전기": -208}
+    r["standard"]["net_income"] = {"당기": -4_030, "전기": -4_320}
+    s = score_report(r)
+    debt = next(m for m in s["metrics"] if m["지표"] == "부채비율(%)")
+    assert debt["값"] == float("inf") and debt["점수"] == 0.0
+    assert s["values"]["ROE(%)"] is None
+    assert "완전자본잠식 → CCC 이하" in s["flags"]
+    assert s["credit_grade"] in ("CCC", "CC", "C", "D")
+    ratios = build_ratios(r, s)
+    assert ratios["재무구조"]["부채비율(%)"] == "자본잠식"
+    json.dumps(ratios)
+
+
 def test_추출_검증_실패면_등급을_내지_않는다():
     r = _report()
     r["validation"] = [{"ok": True}, {"ok": False}]
@@ -191,7 +208,9 @@ def test_짧은_전기는_재무상태표만_싣는다():
 
 
 def test_inf_는_JSON_에_실을_수_있게_바꾼다():
-    assert _clean(float("inf")) == "상환불가(영업CF≤0)"
+    assert _clean(float("inf"), "차입금상환기간(년)") == "상환불가(영업CF≤0)"
+    assert _clean(float("inf"), "부채비율(%)") == "자본잠식"
+    assert _clean(float("inf")) == "산출불가"
     assert _clean(math.nan) is None
     json.dumps(_clean(float("inf")))
 

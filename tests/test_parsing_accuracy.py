@@ -1,8 +1,8 @@
 # 감사보고서 파싱 정확도 — 실제 PDF 가 있어야 도는 검증
 #
-# PDF 는 저장소에 넣지 않았다. AUDIT_PDF_DIR 에 감사보고서 4건(지오영·알보젠코리아·
-# 아주약품·백제약품)을 두고 돌린다. 파일명은 tests/fixtures/audit_ground_truth.json 의
-# files 접두어로 찾는다(없으면 회사명으로 찾는다).
+# PDF 는 저장소에 넣지 않았다. AUDIT_PDF_DIR 에 감사보고서를 두고 돌린다 — 정답표
+# (tests/fixtures/audit_ground_truth.json)에 있는 9개사 중 폴더에 있는 회사만 검사한다.
+# 파일명은 정답표의 files 접두어로 찾는다(없으면 회사명으로 찾는다).
 import glob
 import json
 import os
@@ -25,12 +25,13 @@ def _pdf(company):
     return None
 
 
-pytestmark = pytest.mark.skipif(
-    not PDF_DIR or not all(_pdf(c) for c in GT["files"]),
-    reason="AUDIT_PDF_DIR 에 감사보고서 PDF 4건이 필요합니다")
+# 회사별로 건너뛴다 — 처음 받은 4건만 있는 환경에서도 그 4건은 검사한다
+COMPANIES = [pytest.param(c, marks=pytest.mark.skipif(
+    not PDF_DIR or not _pdf(c), reason=f"AUDIT_PDF_DIR 에 {c} 감사보고서가 없습니다"))
+    for c in GT["files"]]
 
 
-@pytest.mark.parametrize("company", list(GT["files"]))
+@pytest.mark.parametrize("company", COMPANIES)
 def test_표준계정이_사람이_읽은_정답과_일치(company):
     std = parse_audit_report(_pdf(company))["standard"]
     wrong = [(key, p, v, std.get(key, {}).get(p))
@@ -39,13 +40,13 @@ def test_표준계정이_사람이_읽은_정답과_일치(company):
     assert wrong == []
 
 
-@pytest.mark.parametrize("company", list(GT["files"]))
+@pytest.mark.parametrize("company", COMPANIES)
 def test_회계_항등식이_모두_성립(company):
     checks = parse_audit_report(_pdf(company))["validation"]
     assert checks and all(c["ok"] for c in checks)
 
 
-@pytest.mark.parametrize("company", list(GT["files"]))
+@pytest.mark.parametrize("company", COMPANIES)
 def test_표선_방식과_좌표_방식이_모든_칸에서_일치(company):
     for stype, entry in evaluate(_pdf(company))["statements"].items():
         c = entry["parser_vs_coordinates"]
