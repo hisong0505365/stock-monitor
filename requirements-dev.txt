@@ -1,0 +1,4 @@
+# 테스트 전용 — pip install -r requirements.txt -r requirements-dev.txt
+pytest==9.1.1
+# DB 적재 통합 테스트(tests/test_export_integration.py)에만 필요
+psycopg[binary]==3.3.6

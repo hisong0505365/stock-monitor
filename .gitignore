@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+# Supabase service_role 키 — RLS 를 우회하므로 절대 커밋하지 않는다
+.env
+# 감사보고서 원본·미리보기 결과
+audit_reports/
+export_preview.json
