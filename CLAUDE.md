@@ -19,4 +19,4 @@
 - Windows PowerShell 에서 환경 변수: `$env:AUDIT_PDF_DIR="audit_reports"; python -m pytest tests`
 - Tesseract 는 PATH 에 있어야 한다(`tesseract --list-langs` 에 `kor` 가 보여야 함).
 - 커밋 메시지 끝에 `Co-Authored-By: Claude ...` 를 붙인다(세션 지침).
-- 작업 브랜치 `claude/pdf-ocr-parsing-disclosure-zo7zya` = PR #2. push 하면 PR 이 갱신된다.
+- PR #2(`claude/pdf-ocr-parsing-disclosure-zo7zya`)는 2026-09-28 main 에 병합됐다. 새 작업은 main 에서 새 브랜치를 만들어 PR 로.

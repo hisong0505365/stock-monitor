@@ -1,7 +1,8 @@
 # 인수인계 — 감사보고서 파싱 · 기업신용평가
 
 > 다른 세션·다른 PC 에서 이어받을 때 **이 문서를 먼저 전부 읽을 것.**
-> 작성: 2026-09-28 (클라우드 세션 → 로컬 PC 이관). 규칙은 `AGENTS.md`, 수치 근거는 `docs/`.
+> 작성: 2026-09-28 (클라우드 세션 → 로컬 PC 이관) · 갱신: 2026-09-28 (PR #2 main 병합).
+> 규칙은 `AGENTS.md`, 수치 근거는 `docs/`.
 
 ## 1. 무엇을 만들고 있나
 
@@ -19,15 +20,22 @@
 
 ## 2. 지금 상태 (2026-09-28)
 
-### stock-monitor — 브랜치 `claude/pdf-ocr-parsing-disclosure-zo7zya` = **PR #2** (main 미병합)
+### stock-monitor — **main 에 병합 완료** (PR #2, 2026-09-28, 병합 커밋 `6c73a93`)
 
 | 커밋 | 내용 |
 |---|---|
 | 1차 | PDF 구조 분석, 파서, 정확도 검증기, 정답표 4건 |
 | 2차 | `credit_export` 대시보드 연동 + 실제 PostgreSQL 적재 검증으로 10건 수정 |
 | 3차 `513cc31` | 감사보고서 5건 추가 검증, OCR 개선, 자본잠식 비율 수정 |
+| `de015a8` | 로컬 PC 이관용 안내(`AGENTS.md` · `CLAUDE.md` · `HANDOFF.md` · `requirements-dev.txt`) |
+| `04add7d` · `034b99e` | 먼저 병합된 PR #1(`pharmacy_finder/`)을 받아 합침 — 충돌 없음, `AGENTS.md` 에 구성 추가 |
 
-- 테스트 143개 통과(PDF·DB·Tesseract 모두 있을 때). 없으면 111 통과 / 32 건너뜀.
+- main 에는 PR #1 로 들어온 **병원 근처 약국 찾기 앱(`pharmacy_finder/`)** 도 있다. 별도 앱이고 규칙은
+  `pharmacy_finder/CLAUDE.md`, 테스트는 그 폴더에서(`python -m pytest`, 32개).
+- 감사보고서 테스트 143개 통과(PDF·DB·Tesseract 모두 있을 때, 병합 직전 main 과 합친 상태로 확인).
+  없으면 111 통과 / 32 건너뜀.
+- **로컬 PC(`C:\dev\stock-monitor`)에서도 확인**(2026-09-28): 138 통과 / 2 건너뜀 — psycopg 가 없어
+  DB 통합 테스트, Tesseract 가 없어 OCR 테스트가 건너뜀. 나머지(정답표·구조 포함)는 모두 통과.
 - 정답표 9개사 240값 일치, 구조 2,681칸 일치, 회계 항등식 129개 통과.
 - OCR 숫자 2,681 / 2,681 (텍스트 레이어 없이 열 배치까지 OCR 로 찾는 조건 포함), 계정명 84.8%.
 
@@ -60,7 +68,7 @@
 
 ## 3. 다음 할 일 (우선순위 순)
 
-1. **PR #2 검토 · 병합** (stock-monitor). 저장소에 CI 는 없다 — 로컬에서 테스트를 돌려 확인.
+1. ~~PR #2 검토 · 병합~~ — 2026-09-28 완료.
 2. **ar-dashboard 기능 브랜치 로컬 확인** → `npm test` · `npm run dev` 로 화면 확인 → main 병합·배포는
    사용자 결정.
 3. **실제 Supabase 에 첫 적재.** 클라우드 세션에서는 Supabase 키가 없어 연결하지 않았고, DART·OpenDART 는
@@ -95,8 +103,13 @@
 
 ## 5. 로컬(Windows) 환경
 
+새 작업은 **main 에서 새 브랜치**를 만들어 PR 로 올린다. 병합된 브랜치
+(`claude/pdf-ocr-parsing-disclosure-zo7zya`)에 이어 커밋하지 않는다. 저장소에 CI 는 없다 — PR 전에 로컬에서
+테스트를 돌린다.
+
 ```powershell
 cd C:\dev\stock-monitor
+git switch main; git pull
 py -3.11 -m venv .venv; .\.venv\Scripts\Activate.ps1      # Python 3.11 이상 (numpy 2.4)
 pip install -r requirements.txt -r requirements-dev.txt
 $env:AUDIT_PDF_DIR="audit_reports"; python -m pytest tests
