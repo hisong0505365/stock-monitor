@@ -22,6 +22,7 @@ service_role 키로 쓰고, 대시보드는 읽기만)를 그대로 따른다. �
 
 ```bash
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # 테스트할 때만 (pytest · psycopg)
 ```
 
 `.env` (이 PC 에만 둔다 — **service_role 키는 RLS 를 우회하므로 절대 커밋하지 않는다**)

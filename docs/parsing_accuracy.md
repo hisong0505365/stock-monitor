@@ -134,7 +134,7 @@ PDF ─▶ ① 텍스트 레이어 확인 ─▶ ② 페이지 분류 ─▶ ③
 ## 5. 재현
 
 ```bash
-pip install -r requirements.txt            # PyMuPDF
+pip install -r requirements.txt -r requirements-dev.txt   # PyMuPDF · pytest
 # 정답표·구조·항등식 검증 (감사보고서 PDF 폴더 — 정답표에 있는 회사 중 폴더에 있는 것만 검사)
 AUDIT_PDF_DIR=/경로/감사보고서 python -m pytest tests/test_parsing_accuracy.py -v
 # OCR 규칙 단위 테스트 (Tesseract 불필요)
